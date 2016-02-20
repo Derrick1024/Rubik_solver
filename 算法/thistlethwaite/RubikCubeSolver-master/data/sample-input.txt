@@ -1,0 +1,13 @@
+# U = upper, F = front, L = left, R = right, D = down, B = back
+#   U
+# L F R B
+#   D
+   WWW
+   WWW
+   WWW
+RRRGGGOOOBBB
+RRRGGGOOOBBB
+YYYBRYROOYYB
+   RYG
+   GYY
+   OBG

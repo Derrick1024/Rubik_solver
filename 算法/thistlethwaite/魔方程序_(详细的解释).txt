@@ -1,0 +1,607 @@
+后面有详细解释
+/*
+  Jaap Scherphuis,  24/01/2004,  jaapsch_at_yahoo_do_com
+
+  Thistlethwaite's algorithm.
+*/
+
+#include <iostream>
+#include <string.h>
+using namespace std;
+char
+	// RLFBUD is the face order used for input, so that a correctly oriented
+	// piece in the input has its 'highest value' facelet first. The rest of the
+	// program uses moves in FBRLUD order.
+	*faces="RLFBUD",
+	// I use char arrays here cause they can be initialised with a string
+	// which is shorter than initialising other arrays.
+	// Internally cube uses slightly different ordering to the input so that
+	//  orbits of stage 4 are contiguous. Note also that the two corner orbits
+	//  are diametrically opposite each other.
+	//input:  UF UR UB UL  DF DR DB DL  FR FL BR BL  UFR URB UBL ULF   DRF DFL DLB DBR
+	//        A  B  C  D   E  F  G  H   I  J  K  L   M   N   O   P     Q   R   S   T   
+	//        A  E  C  G   B  F  D  H   I  J  K  L   M   S   N   T     R   O   Q   P
+	//intrnl: UF DF UB DB  UR DR UL DL  FR FL BR BL  UFR UBL DFL DBR   DLB DRF URB ULF 
+	*order="AECGBFDHIJKLMSNTROQP",
+	//To quickly recognise the pieces, I construct an integer by setting a bit for each
+	// facelet. The unique result is then found on the list below to map it to the correct
+	// cubelet of the cube.
+	//intrnl: UF DF UB DB  UR DR UL DL  FR FL BR BL  UFR UBL DFL DBR   DLB DRF URB ULF 
+	//bithash:20,36,24,40, 17,33,18,34, 5, 6, 9, 10, 21, 26, 38, 41,   42, 37, 25, 22
+	*bithash="TdXhQaRbEFIJUZfijeYV",
+	//Each move consists of two 4-cycles. This string contains these in FBRLUD order.
+	//intrnl: UF DF UB DB  UR DR UL DL  FR FL BR BL  UFR UBL DFL DBR   DLB DRF URB ULF 
+	//        A0 1B  C  D   E  F  G  H   I  J  K  L   M   N   O   P     Q   R   S   T   
+	*perm="AIBJTMROCLDKSNQPEKFIMSPRGJHLNTOQAGCEMTNSBFDHORPQ",
+
+	// current cube position
+	pos[20],ori[20],val[20],
+	// temporary variable used in swap macro
+	TEMP,
+	// pruning tables, 2 for each phase
+	*tables[8];
+	// current phase solution
+int move[20],moveamount[20],
+	// current phase being searched (0,2,4,6 for phases 1 to 4)
+	phase=0,
+	// Length of pruning tables. (one dummy in phase 1);
+	tablesize[]={1,4096,  6561,4096,  256,1536,  13824,576};
+
+// Use very ugly and unsafe macro to swap items instead of classic routine with
+//   pointers for the sole reason of brevity
+#define SWAP(a,b) TEMP=a;a=b;b=TEMP;
+// number 65='A' is often subtracted to convert char ABC... to number 0,1,2,...
+#define CHAROFFSET 65
+
+
+
+// Cycles 4 pieces in array p, the piece indices given by a[0..3].
+void cycle(char*p,char*a){
+	SWAP(p[*a-CHAROFFSET],p[a[1]-CHAROFFSET]);
+	SWAP(p[*a-CHAROFFSET],p[a[2]-CHAROFFSET]);
+	SWAP(p[*a-CHAROFFSET],p[a[3]-CHAROFFSET]);
+}
+
+// twists i-th piece a+1 times.
+void twist(int i,int a){
+	i-=CHAROFFSET;
+	ori[i]=(ori[i]+a+1)%val[i];
+}
+
+
+// set cube to solved position
+void reset(){
+	for( int i=0; i<20; pos[i]=i, ori[i++]=0);
+}
+
+// convert permutation of 4 chars to a number in range 0..23
+int permtonum(char* p){
+	int n=0;
+	for ( int a=0; a<4; a++) {
+		n*=4-a;
+		for( int b=a; ++b<4; )
+			if (p[b]<p[a]) n++;
+	}
+	return n;
+}
+
+// convert number in range 0..23 to permutation of 4 chars.
+void numtoperm(char* p,int n,int o){
+	p+=o;
+	p[3]=o;
+	for (int a=3; a--;){
+		p[a] = n%(4-a) +o;
+		n/=4-a;
+		for (int b=a; ++b<4; )
+			if ( p[b] >= p[a]) p[b]++;
+	}
+}
+
+// get index of cube position from table t
+int getposition(int t){
+	int i=-1,n=0;
+	switch(t){
+	// case 0 does nothing so returns 0
+	case 1://edgeflip
+		// 12 bits, set bit if edge is flipped
+		for(;++i<12;) n+= ori[i]<<i;
+		break;
+	case 2://cornertwist
+		// get base 3 number of 8 digits - each digit is corner twist
+		for(i=20;--i>11;) n=n*3+ori[i];
+		break;
+	case 3://middle edge choice
+		// 12 bits, set bit if edge belongs in Um middle slice
+		for(;++i<12;) n+= (pos[i]&8)?(1<<i):0;
+		break;
+	case 4://ud slice choice
+		// 8 bits, set bit if UD edge belongs in Fm middle slice
+		for(;++i<8;) n+= (pos[i]&4)?(1<<i):0;
+		break;
+	case 5://tetrad choice, twist and parity
+		int corn[8],j,k,l,corn2[4];
+		// 8 bits, set bit if corner belongs in second tetrad.
+		// also separate pieces for twist/parity determination
+		k=j=0;
+		for(;++i<8;)
+			if((l=pos[i+12]-12)&4){
+				corn[l]=k++;
+				n+=1<<i;
+			}else corn[j++]=l;
+		//Find permutation of second tetrad after solving first
+		for(i=0;i<4;i++) corn2[i]=corn[4+corn[i]];
+		//Solve one piece of second tetrad
+		for(;--i;) corn2[i]^=corn2[0];
+
+		// encode parity/tetrad twist
+		n=n*6+corn2[1]*2-2;
+		if(corn2[3]<corn2[2])n++;
+		break;
+	case 6://two edge and one corner orbit, permutation
+		n=permtonum(pos)*576+permtonum(pos+4)*24+permtonum(pos+12);
+		break;
+	case 7://one edge and one corner orbit, permutation
+		n=permtonum(pos+8)*24+permtonum(pos+16);
+		break;
+	}
+	return n;
+}
+
+
+// sets cube to any position which has index n in table t
+void setposition(int t, int n){
+	int i=0,j=12,k=0;
+	char *corn="QRSTQRTSQSRTQTRSQSTRQTSR";
+	reset();
+	switch(t){
+	// case 0 does nothing so leaves cube solved
+	case 1://edgeflip
+		for(;i<12;i++,n>>=1) ori[i]=n&1;
+		break;
+	case 2://cornertwist
+		for(i=12;i<20;i++,n/=3) ori[i]=n%3;
+		break;
+	case 3://middle edge choice
+		for(;i<12;i++,n>>=1) pos[i]= 8*n&8;
+		break;
+	case 4://ud slice choice
+		for(;i<8;i++,n>>=1) pos[i]= 4*n&4;
+		break;
+	case 5://tetrad choice,parity,twist
+		corn+=n%6*4;
+		n/=6;
+		for(;i<8;i++,n>>=1)
+			pos[i+12]= n&1 ? corn[k++]-CHAROFFSET : j++;
+		break;
+	case 6://slice permutations
+		numtoperm(pos,n%24,12);n/=24;
+		numtoperm(pos,n%24,4); n/=24;
+		numtoperm(pos,n   ,0);
+		break;
+	case 7://corner permutations
+		numtoperm(pos,n/24,8);
+		numtoperm(pos,n%24,16);
+		break;
+	}
+}
+
+
+//do a clockwise quarter turn cube move
+void domove(int m){
+	char *p=perm+8*m, i=8;
+	//cycle the edges
+	cycle(pos,p);
+	cycle(ori,p);
+	//cycle the corners
+	cycle(pos,p+4);
+	cycle(ori,p+4);
+	//twist corners if RLFB
+	if(m<4)
+		for(;--i>3;) twist(p[i],i&1);
+	//flip edges if FB
+	if(m<2)
+		for(i=4;i--;) twist(p[i],0);
+}
+
+// calculate a pruning table
+void filltable(int ti){
+	int n=1,l=1, tl=tablesize[ti];
+	// alocate table memory
+	char* tb = tables[ti]=new char[tl];
+	//clear table
+	memset( tb, 0, tl);
+	//mark solved position as depth 1
+	reset();
+	tb[getposition(ti)]=1;
+	
+	// while there are positions of depth l
+	while(n){
+		n=0;
+		// find each position of depth l
+		for(int i=0;i<tl;i++){
+			if( tb[i]==l ){
+				//construct that cube position
+				setposition(ti,i);
+				// try each face any amount
+				for( int f=0; f<6; f++){
+					for( int q=1;q<4;q++){
+						domove(f);
+						// get resulting position
+						int r=getposition(ti);
+						// if move as allowed in that phase, and position is a new one
+						if( ( q==2 || f>=(ti&6) ) && !tb[r]){
+							// mark that position as depth l+1
+							tb[r]=l+1;
+							n++;
+						}
+					}
+					domove(f);
+				}
+			}
+			}
+		l++;
+		}
+}
+
+// Pruned tree search. recursive.
+bool searchphase(int movesleft, int movesdone,int lastmove){
+	// prune - position must still be solvable in the remaining moves available
+	if( tables[phase  ][getposition(phase  )]-1 > movesleft ||
+	    tables[phase+1][getposition(phase+1)]-1 > movesleft ) return false;
+
+	// If no moves left to do, we have solved this phase
+	if(!movesleft) return true;
+
+	// not solved. try each face move
+	for( int i=6;i--;){
+		// do not repeat same face, nor do opposite after DLB.
+		if( i-lastmove && (i-lastmove+1 || i|1 ) ){
+			move[movesdone]=i;
+			// try 1,2,3 quarter turns of that face
+			for(int j=0;++j<4;){
+				//do move and remember it
+				domove(i);
+				moveamount[movesdone]=j;
+				//Check if phase only allows half moves of this face
+				if( (j==2 || i>=phase ) &&
+					//search on
+					searchphase(movesleft-1,movesdone+1,i) ) return true;
+			}
+			// put face back to original position.
+			domove(i);
+		}
+	}
+	// no solution found
+	return false;
+}
+
+int main(int argc, char **argv){
+	int f,i=0,j=0,k=0,pc,mor;
+
+	// initialise tables
+	for(; k<20; k++) val[k]=k<12?2:3;
+	for(; j<8; j++) filltable(j);
+
+	// read input, 20 pieces worth
+	for(; i<20; i++){
+		f=pc=k=mor=0;
+		for(;f<val[i];f++){
+			// read input from stdin, or...
+			//     do{cin>>c;}while(c==' ');
+			//     j=strchr(faces,c)-faces;
+			// ...from command line and get face number of facelet
+			j=strchr(faces,argv[i+1][f])-faces;
+			// keep track of principal facelet for orientation
+			if(j>k) {k=j;mor=f;}
+			//construct bit hash code
+			pc+= 1<<j;
+		}
+		// find which cubelet it belongs, i.e. the label for this piece
+		for(f=0; f<20; f++)
+			if( pc==bithash[f]-64 ) break;
+		// store piece
+		pos[order[i]-CHAROFFSET]=f;
+		ori[order[i]-CHAROFFSET]=mor%val[i];
+	}
+
+	//solve the cube
+	// four phases
+	for( ; phase<8; phase+=2){
+		// try each depth till solved
+		for( j=0; !searchphase(j,0,9); j++);
+		//output result of this phase
+		for( i=0; i<j; i++)
+			cout<<"FBRLUD"[move[i]]<<moveamount[i];
+		//cout<<" ";
+	}
+}
+
+没专业学过c++，计算机程序知识，可能有些说法不精确，不适宜，但应该佷直白。另外程序佷巧妙，足可见算法之妙，且程序佷简洁，见Jaap Scherphuis功力深厚。我一开始，也想写个用Thistlethwaite's algorithm魔方程序，但见了他的，我打算解释他的程序，供大家参考。再次申明,佩服之至。感谢Jaap Scherphuis。大家也享受吧。
+所有资料包括介绍Thistlethwaite的方法，我存储在http://pan.baidu.com/share/link?shareid=405906&uk=1898872422
+
+
+旋转函数
+	UF DF UB DB UR DR UL DL FR FL  BR BL         UFR UBL DFL DBR DLB DRF URB ULF
+	0A 1B 2C 3D 4E 5F 6G 7H 8I 9J 10K 11L	     12M 13N 140 15P 16Q 17R 18S 19T
+	这是位置编排方式
+	
+	POS【20】 各个位置所含的方块
+	ori【20】 各个位置所含方块的朝向
+	val【20】 各个位置所含方块朝向总数 角3 棱2
+	*perm="AIBJTMROCLDKSNQPEKFIMSPRGJHLNTOQAGCEMTNSBFDHORPQ"  以八个为一组分别代表FBRLUD面 以此来为旋转面上各位置的方向、所含块提供准确变化方式
+	
+	void domove(int m){ m从0到5 分别代表fbrlud面的旋转 顺时针
+		char *p=perm+8*m, i=8; 得到perm 中该面的位置
+		cycle(pos,p); 旋转一面上四个棱块 即当前块得到前一块的方块值
+		cycle(ori,p); 得到前一方块的朝向
+		cycle(pos,p+4); 旋转一面上四个角块 即当前块得到前一块的方块值
+		cycle(ori,p+4); 得到前一方块的朝向
+		if(m<4)
+			for(;--i>3;) twist(p[i],i&1); 旋转角块朝向如果是rlfb面转动
+		if(m<2)
+			for(i=4;i--;) twist(p[i],0);  旋转棱块朝向如果是fb面转动
+	}	
+	
+	#define SWAP(a,b) TEMP=a;a=b;b=TEMP; 用来交换两个变量的值
+	#define CHAROFFSET 65 用来转换A，B，C到1，2，3
+	
+	void cycle(char*p,char*a){ 旋转*p中的4个块 4个块位置由a【0，1，2，3】决定
+		SWAP(p[*a-CHAROFFSET],p[a[1]-CHAROFFSET]);
+		SWAP(p[*a-CHAROFFSET],p[a[2]-CHAROFFSET]);
+		SWAP(p[*a-CHAROFFSET],p[a[3]-CHAROFFSET]);
+	}
+	前面cycle（pos，p） p指定在perm中各块的字母 
+	*p-CHAROFFSET 可以得到该块的序列号
+	就变成转换pos【】，pos【】的值
+	三个swap使各块得到前一块的值 可自己转换看看就明白了
+	
+	对if(m<4)
+			for(;--i>3;) twist(p[i],i&1); 旋转角块朝向如果是rlfb面转动
+			由7到4  即
+			twist(p[7],1)
+			twist(p[6],0)
+			twist(p[5],1)
+			twist(p[4],0) 注意到*perm中前四组即（32个代表fbrl旋转的字符）每组的后四个角块都是按由该面左上角逆时针的顺序
+			p【4】|   |p【5】
+			     |   |
+			p【7】|   |p【6】
+			void twist(int i,int a){
+				i-=65;
+				ori[i]=(ori[i]+a+1)%3;
+			}
+			对P【5】和p【7】 该块方向值=(该块方向值（即前一块刚才的方向值）+2）%3
+			对5 7   1 代表正向(就朝向要旋转的面） 0代表上下 2代表左右（要旋转面的左右面）
+			现在	之后
+			0	2 原来前一块的上下面变为现在面的左右面
+			1	0 原来前一块的左右面变为现在面的上下面
+			2	1 原来前一块的正面仍是正面
+			对4 6        该块方向值=(该块方向值（即前一块刚才的方向值）+1）%3
+			现在	之后
+			0	1
+			1	2
+			2	0 一样的分析
+			有 0代表朝上下只有1，2在5，7和4，6间不同这是因为对当前面的4，6为魔方整体向左向右旋转90度面的5，7位 同样的方向值有不同的意义
+			即 对每一面旋转近考虑当前面 旋转后对从另一面看仍然符合旋转后的结果 
+	
+	if(m<2)
+			for(i=4;i--;) twist(p[i],0);运算由twist(p[3],0)到twist(p[0],0)
+			void twist(int i,int a){
+				i-=65;
+				ori[i]=(ori[i]+1)%2;
+			}
+			这个好理解写由0到1，或由1变0
+	void reset(){	使魔方复原
+		for( int i=0; i<20; pos[i]=i, ori[i++]=0);
+	}
+建表函数	
+	tablesize[]={1,4096,  6561,4096,  256,1536,  13824,576};
+	void filltable(int ti){ 产生一个表格供寻找得到解决途径
+		int n=1,l=1, tl=tablesize[ti];规定表格大小
+		char* tb = tables[ti]=new char[tl];
+		memset( tb, 0, tl);
+		reset(); 回到复原状态
+		tb[getposition(ti)]=1; 标记当前为第一层
+		while(n){ 当有魔方在l层 若没有的话经过下面n=0 却不能用到下面的n++而退出
+			过程先l一直加 在增加到a后 对a层所有情况处理有继续到a+1层的 a层处理完后到a+1，但a+1层所有情况都不能使某一情况对应a+2层，且不能使n增大，l变为a+2，n=0推出
+			n=0;
+			for(int i=0;i<tl;i++){	遍历来找l层所有情况
+				if( tb[i]==l ){
+					setposition(ti,i); 使魔方到table【ti】的序列i情况
+					for( int f=0; f<6; f++){	尝试每个面任何次
+						for( int q=1;q<4;q++){
+							domove(f);
+							int r=getposition(ti); 得到旋转后的序列
+							if( ( q==2 || f>=(ti&6) ) && !tb[r]){ 如果魔方1:允许当前转动（a：任何情况下都允许每面转两次 b
+											：ti=1，1&6=0,任何面都可转动；ti=2，3 不能转fb面；ti=4，5 只能转ud面
+											ti=6，7 只能每面转180度。
+								tb[r]=l+1;使达到的最大深度加一
+								n++;
+							}
+						}
+						domove(f);使会原状态
+					}
+				}
+				}
+			l++; 深度加一
+			} 当ti=0时 getposition得0 通过!tb[r]退出
+		}
+	
+	int getposition(int t){	得到当前魔方状态在当前阶段表格中的序列   要注意这里只对关键进行处理，要从本质上看，很多情况本质上是一样的
+	与setposition结合起来看就明白了
+	int i=-1,n=0;
+		switch(t){ 当t=0 返回0
+		case 1:
+			for(;++i<12;) n+= ori[i]<<i;对棱块i朝向如果朝向不对，就加上1右移i格 0则相当于没效果 即用12个二进制位来表示棱块朝向
+			break;
+		case 2:
+			for(i=20;--i>11;) n=n*3+ori[i];对角块朝向，可认为是8个三进制位
+			break;
+		case 3:
+			for(;++i<12;) n+= (pos[i]&8)?(1<<i):0; 对0～11块当pos【i】为8，9，10，11时移动i位 即 用12个二进制位来表示中层棱块位置
+			break;
+		case 4:
+			for(;++i<8;) n+= (pos[i]&4)?(1<<i):0; 上层下层切片情况，以上已把中层安好，现在只管uf，df，ub，db与ru，lu，rd，ld各形成两个圈。
+			break;	这里对ru，rd，lu，ld的块进行标记。
+		case 5:	四分体情况 仅由各面的180度旋转，每个角块能处的位置形成一个环 case4、5完成后魔方的状态仅有各面180度形成，所以各情况间能通过180度转换形成的本质上是一样的。
+			int corn[8],j,k,l,corn2[4]; 该阶段分两部分来得到序列 第一阶段是一个环上各个块所在的位置 第二阶段是对应角块所形成的顺序。
+			k=j=0;
+			for(;++i<8;)
+				if((l=pos[i+12]-12)&4){
+					corn[l]=k++;	corn（4～7）分别表示16~19角块的出现顺序
+					n+=1<<i;   对位置进行处理
+				}else corn[j++]=l;  corn（0~3) corn（0）表示12～15第一个数-12，corn（1）表示12～15第二个数-12，...
+			for(i=0;i<4;i++) corn2[i]=corn[4+corn[i]];	corn[i]的值是多少，corn2【i】=该值加4在16～19出现的顺序
+			for(;--i;) corn2[i]^=corn2[0];	转换以得到相对位置 把corn2【0】对应的数顺序当作0（我们自己觉得他最后变为0但并未赋值，看底下分析），对后面重新排序
+			n=n*6+corn2[1]*2-2;	对于每一种16～19出现位置的排列，若固定任意值剩下有6种排列
+			if(corn2[3]<corn2[2])n++; 对最后两个数进行排列
+			break;
+			先分析一下 异或产生后的效果
+			^	0	1	2	3
+			0	0	1	2	3
+			1	1	0	3	2
+			2	2	3	0	1
+			3	3	2	1	0
+			对任意数与其他数异或运算 0不变 对不是0的数则该数与0互换值，剩下两个互换值也在该数与剩余3个数进行运算后互换值
+			对corn前四	15 13 12 14
+			对应值		19 17 16 18
+			顺序		1  3  0  2
+			结果		0  2  1  3
+			即互换值
+			下面说明这么换得合理性
+			1，先说明对corn前四个这一步不需其顺序必须按照12，13，14，15.从魔方中心看这8块（4组）是一样的，等价的，12～15我们自己定义的。且这步
+			   的目的是使角分成两部分。我们只管各个(4个）的对应情况是否满足，顺序无影响。即使不是按12到顺序，我们就把他当作是。
+			2，就对特殊的情况分析	初始状态	 UFR UBL DFL DBR	按pos（12～19）顺序
+			  初始对应状态     		 DLB DRF URB ULF
+			   当旋转任意面180比如r转后	dbr ubl dfl ufr
+		 					dlb urb drf ulf
+		 	 由180度旋转而来是等价的 若我们仍按初始12～15的顺序排列变为
+							UFR UBL DFL DBR
+							ulf urb drf dlb 只有中间两个和外边两个换
+		case 6:
+			n=permtonum(pos)*576+permtonum(pos+4)*24+permtonum(pos+12); permtonum见下面一点。对各个圈中顺序的情况，可同样当作24进制
+			break;
+		case 7:
+			n=permtonum(pos+8)*24+permtonum(pos+16); 同上
+		break;
+		}
+		return n;
+	}	
+	int permtonum(char* p){ 将四个有顺序的字符转换为该顺序在所有顺序中的序列号0～23
+		int n=0;
+		for ( int a=0; a<4; a++) {
+			n*=4-a;
+			for( int b=a; ++b<4; )
+				if (p[b]<p[a]) n++;
+		}
+		return n;
+		举个例子 3 2 4 1 （2*3+1）*2+1=15
+		用字符（a*3+b)*2+c=6*a+2b+c 符合排列知识
+		也可联系进制 或从前往后、从后往前 每个数都会一直乘到（后面数个数）的阶乘
+	}
+	void setposition(int t, int n){getposition逆运算
+		int i=0,j=12,k=0;
+		char *corn="QRSTQRTSQSRTQTRSQSTRQTSR"; 可联系getposition case5看看第一个当作对的，再看r所处位置最后看剩下两个大小 
+		reset();
+		switch(t){当t=0 返回0
+		case 1:逆运算
+			for(;i<12;i++,n>>=1) ori[i]=n&1;
+			break;
+		case 2:逆运算
+			for(i=12;i<20;i++,n/=3) ori[i]=n%3;
+			break;
+		case 3:逆运算
+			for(;i<12;i++,n>>=1) pos[i]= 8*n&8;
+			break;
+		case 4:逆运算
+			for(;i<8;i++,n>>=1) pos[i]= 4*n&4;
+			break;
+		case 5:逆运算
+			corn+=n%6*4; *4的偏移 得到16～19排列顺序 也是值
+			n/=6;  得到16～19位置情况
+			for(;i<8;i++,n>>=1)
+				pos[i+12]= n&1 ? corn[k++]-CHAROFFSET : j++;对于不是16～19的块（即12～15）按顺序输入
+			break;再按顺序依次赋值。
+		case 6:逆运算
+			numtoperm(pos,n%24,12);n/=24;
+			numtoperm(pos,n%24,4); n/=24;
+			numtoperm(pos,n   ,0);
+			break;
+		case 7:逆运算
+			numtoperm(pos,n/24,8);
+			numtoperm(pos,n%24,16);
+			break;
+		}
+	}	
+
+	void numtoperm(char* p,int n,int o){
+		p+=o;
+		p[3]=o;
+		for (int a=3; a--;){
+			p[a] = n%(4-a) +o;n%（4-a)只能提供0～3还要加上所处位置  此时为比后面大的数
+			n/=4-a;
+			for (int b=a; ++b<4; )
+				if ( p[b] >= p[a]) p[b]++;比前面大加几个再加上等于自己多一个
+		}
+	}
+查询函数
+	bool searchphase(int movesleft, int movesdone,int lastmove){
+		if( tables[phase  ][getposition(phase  )]-1 > movesleft ||
+		    tables[phase+1][getposition(phase+1)]-1 > movesleft ) return false;联系main（）可知能找到最短步骤，会先一直返回false
+			排除把剩下步数用完都不够的
+		if(!movesleft) return true;当movesleft==0退出，且先经过上面则tables[phase  ][getposition(phase  )]-1 =1tables[phase+1][getposition(phase+1)]-1=1
+						完成
+		for( int i=6;i--;){ 没完成尝试每个面
+			// do not repeat same face, nor do opposite after DLB.
+			if( i-lastmove && (i-lastmove+1 || i|1 ) ){ 不能重复上一步，上一步一把该面转了1～3次(i-lastmove+1 || i|1 )没看懂，我删了也行
+				move[movesdone]=i;
+				for(int j=0;++j<4;){
+					domove(i);
+					moveamount[movesdone]=j;该面旋转次数
+					if( (j==2 || i>=phase ) && phase是加2的见main（）排除该阶段不能旋转的情况 见filltable（）
+						searchphase(movesleft-1,movesdone+1,i) ) return true;
+				}
+				domove(i);
+			}
+		}
+		return false;
+	}
+	
+main函数
+	*faces="RLFBUD",     
+	input:  UF UR UB UL  DF DR DB DL  FR FL BR BL  UFR URB UBL ULF   DRF DFL DLB DBR 输入顺序完全按照上面的顺序，比如uf先输u面后f面 目的是使人更加容易
+	UF DF UB DB  UR DR UL DL  FR FL BR BL  UFR UBL DFL DBR   DLB DRF URB ULF 这是一开始的编排位置方式
+	*order="AECGBFDHIJKLMSNTROQP", 用来改换输入顺序到编排位置
+	//bithash:20,36,24,40, 17,33,18,34, 5, 6, 9, 10, 21, 26, 38, 41,   42, 37, 25, 22 用来得到该块的值 20=2^4+2^2```t是第二十个字符
+	*bithash="TdXhQaRbEFIJUZfijeYV", 用来行成映射关系。比如20，t，为uf面恰好在第0个。按顺序把各块的pc值（见下面） 存下来 以便得到位置值。
+	int main(int argc, char **argv){
+		int f,i=0,j=0,k=0,pc,mor;
+		for(; k<20; k++) val[k]=k<12?2:3;
+		for(; j<8; j++) filltable(j);建表
+
+		输入
+		for(; i<20; i++){
+			f=pc=k=mor=0;
+			for(;f<val[i];f++){
+			j=strchr(faces,argv[i+1][f])-faces;
+			if(j>k) {k=j;mor=f;} k得到最大数ud》fb》rl，来帮助mor获得最大数在输入字符串（共20个，不包括程序名称作参数）的位置来确定该块方向
+			面的顺序是rlfbud
+			pc+= 1<<j; 来得到输入值
+		}
+		for(f=0; f<20; f++)
+			if( pc==bithash[f]-64 ) break; 得到位置值
+		pos[order[i]-CHAROFFSET]=f; 	输入位置值
+		ori[order[i]-CHAROFFSET]=mor%val[i];1：对棱块，注意到前8个先输的是ud，对有上下面的块，当ud在ud面朝向正确，不在则错。对没上下块当bf在下层也正确。
+			第一步到群组u，d，
+			r,l,f2,b2这是正确朝向。对后四个，当ud在fb面朝向正确，不在则错。对没上下块当bf在bf面也正确。转一下，很容易。2：对角块，有5，7和4，6的区分，这里
+			对所有块仅就bf面考虑朝向。（看twist（））UFR UBL DFL DBR为5，7块，DRF DFL DLB DBR为4，6块。对5 7   1 代表正向(就朝向要旋转的面）这里是bf面 
+			0代表上下正确 2代表左右（要旋转面的左右面）即rl面。ud块在第0个正确，第一个为1，第二个为2.那么应先输入ud面，再输入bf面，最后输rl面。对4，6块先输入ud
+			面，再输入rl面，最后输bf面。看输入时连续4个，（第0个和第2个）与（第1个和第3）个不同。输入注意。
+	}
+
+	解决魔方
+	for( ; phase<8; phase+=2){ 两个为一阶段
+		for( j=0; !searchphase(j,0,9); j++); 加大深度，得到最优解。
+		for( i=0; i<j; i++)
+			cout<<"FBRLUD"[move[i]]<<moveamount[i];输出结果。
+	}
+}

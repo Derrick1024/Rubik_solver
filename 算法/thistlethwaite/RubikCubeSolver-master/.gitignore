@@ -1,0 +1,10 @@
+*Thumbs.db
+win/*.dll
+win/*.html
+win/*.ncb
+win/*.suo
+win/*.opensdf
+win/*.sdf
+win/*.vcxproj.*
+win/Debug/
+win/Release/
